@@ -702,23 +702,31 @@ gstd_tcp_element_set (GstdSession * session, gchar * action, gchar * args,
   GstdReturnCode ret;
   gchar *uri;
   gchar **tokens;
+  guint numProperties, propIdx;
 
   g_return_val_if_fail (GSTD_IS_SESSION (session), GSTD_NULL_ARGUMENT);
   g_return_val_if_fail (args, GSTD_NULL_ARGUMENT);
 
-  tokens = g_strsplit (args, " ", 4);
-  check_argument (tokens[0], GSTD_BAD_COMMAND);
-  check_argument (tokens[1], GSTD_BAD_COMMAND);
-  check_argument (tokens[2], GSTD_BAD_COMMAND);
-  check_argument (tokens[3], GSTD_BAD_COMMAND);
+  tokens = g_strsplit (args, " ", -1);
+  numProperties = 0;
+  while ( tokens[numProperties] != '\0') { numProperties++; };
 
-  uri = g_strdup_printf ("/pipelines/%s/elements/%s/properties/%s %s",
-      tokens[0], tokens[1], tokens[2], tokens[3]);
-  ret = gstd_tcp_parse_raw_cmd (session, "update", uri, response);
+  if ((numProperties < 4) || (numProperties % 2 == 1)) { return GSTD_BAD_COMMAND; };
 
-  g_free (uri);
+  // Update the properties pair by pair 
+  for (propIdx = 2; propIdx < numProperties; propIdx+=2) {
+    g_free(*response);  // Clear the buffer between calls
+    *response = NULL;
+    uri = g_strdup_printf ("/pipelines/%s/elements/%s/properties/%s %s",
+        tokens[0], tokens[1], tokens[propIdx], tokens[propIdx+1]);
+    ret = gstd_tcp_parse_raw_cmd (session, "update", uri, response);
+    g_free (uri);
+    if (ret) {  // Exit on any error 
+      break;
+    }
+  }
+
   g_strfreev (tokens);
-
   return ret;
 }
 
@@ -728,24 +736,64 @@ gstd_tcp_element_get (GstdSession * session, gchar * action, gchar * args,
 {
   GstdReturnCode ret;
   gchar *uri;
+  gchar *buffer;
   gchar **tokens;
+  guint16 errors = 0;
+  guint numTokens, propIdx;
+  GString * thisResponse = g_string_new(NULL);
 
   g_return_val_if_fail (GSTD_IS_SESSION (session), GSTD_NULL_ARGUMENT);
   g_return_val_if_fail (args, GSTD_NULL_ARGUMENT);
 
-  tokens = g_strsplit (args, " ", 3);
-  check_argument (tokens[0], GSTD_BAD_COMMAND);
-  check_argument (tokens[1], GSTD_BAD_COMMAND);
-  check_argument (tokens[2], GSTD_BAD_COMMAND);
+  // Test here for memory leak since we don't pass response down 
+  g_warn_if_fail(!*response);
 
-  uri = g_strdup_printf ("/pipelines/%s/elements/%s/properties/%s",
-      tokens[0], tokens[1], tokens[2]);
-  ret = gstd_tcp_parse_raw_cmd (session, "read", uri, response);
+  tokens = g_strsplit (args, " ", -1);
+  numTokens = 0;
+  while ( tokens[numTokens] != '\0') {
+    numTokens++;
+  };
 
-  g_free (uri);
+  if ((numTokens < 3)) {
+    return GSTD_BAD_COMMAND;
+  };
+
+  for (propIdx = 2; propIdx < numTokens; propIdx++) {
+    buffer = NULL;
+    uri = g_strdup_printf ("/pipelines/%s/elements/%s/properties/%s",
+        tokens[0], tokens[1], tokens[propIdx]);
+    ret = gstd_tcp_parse_raw_cmd (session, "read", uri, &buffer);
+    if ( ret ) {
+      errors++;
+      buffer = g_strdup_printf(
+        "{ \"name\": %s, \"value\" : null, \"code\" : %d, \"description\" : \"%s\" }",
+        tokens[propIdx], ret, gstd_return_code_to_string(ret));
+    }
+    if (propIdx > 2) {
+      g_string_append(thisResponse, ",");
+    }
+    g_string_append(thisResponse, buffer);
+
+    g_free (uri);
+    g_free (buffer);
+
+  }
   g_strfreev (tokens);
+  // The commented code will maitain pre-exsting behavior when
+  // exactly one response is returned.
+  // if (numTokens > 3) {
+  *response = g_strconcat("[", thisResponse->str, "]", NULL);
+  // } else {
+  // *response = g_strdup(thisResponse.str);
+  // }
 
-  return ret;
+  g_string_free(thisResponse, TRUE);
+
+  if (errors < (numTokens - 2)) {
+    return GSTD_EOK;
+  } else {
+    return GSTD_BAD_COMMAND;
+  }
 }
 
 static GstdReturnCode
